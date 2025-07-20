@@ -1,86 +1,175 @@
 function Get-CPUInfo {
-   <#
+    <#
 .SYNOPSIS
-Gets CPU information from the local system.
+    Retrieves CPU (processor) information from local or remote computers.
 
 .DESCRIPTION
-Retrieves details about installed processors using CIM. By default, it returns a readable summary.
-Use -Raw to get the full CIM objects.
+    The Get-CPUInfo function collects CPU/processor data using WMI/CIM and optionally exports 
+    the results in various formats including CSV, JSON, TXT, XML, or HTML. It supports querying 
+    multiple computer names and includes a raw output option for advanced use cases.
+
+.PARAMETER ComputerName
+    One or more computer names to query. Defaults to the local computer if not specified.
+
+.PARAMETER ExportFormat
+    Optional. Specifies the format for exporting results. Valid options are: CSV, JSON, TXT, XML, HTML.
+
+.PARAMETER ExportPath
+    Optional. Path where the export file will be saved. If a folder is provided, a filename is auto-generated.
 
 .PARAMETER Raw
-Returns the full CIM object(s) instead of a simplified view.
+    If specified, returns raw WMI/CIM objects instead of parsed fields.
 
 .EXAMPLE
-Get-CPUInfo
-Shows a readable summary of all CPUs.
+    Get-CPUInfo
+
+    Retrieves CPU info from the local machine and returns structured data to the console.
 
 .EXAMPLE
-Get-CPUInfo -Raw
-Returns the full CIM object(s).
+    Get-CPUInfo -ComputerName "PC1","PC2" -ExportFormat JSON
+
+    Queries CPU data from PC1 and PC2 and exports the results as a JSON file to the temp directory.
 
 .EXAMPLE
-(Get-CPUInfo -Raw)[0].Name
-Gets the name of the first processor from raw output.
+    Get-CPUInfo -ExportFormat CSV -ExportPath "C:\Users\computer\Downloads"
+
+    Exports the local CPU info to a CSV file in the specified directory.
 
 .NOTES
-Author: ConnectTek  
-Version: 1.0
+    Author: ConnectTek
+    Last Updated: 20/07/2025
+    Requires: PowerShell 5.1 or later
 #>
 
-    # Allows advanced function features like -Verbose and parameter binding
-    [CmdletBinding()]
-
-    # Declares output types (custom object or CIM instance)
-    [OutputType([pscustomobject], [Microsoft.Management.Infrastructure.CimInstance])]
-
+    [CmdletBinding(
+        SupportsShouldProcess = $False,
+        ConfirmImpact = 'None'
+    )]
     param (
-        # If -Raw is used, return full CIM objects instead of custom view
+        [Parameter(Mandatory = $false)]
+        [ValidatePattern('^[a-zA-Z0-9\-\.]{1,255}$')]
+        [string[]]$ComputerName = $env:COMPUTERNAME,
+
+        [Parameter(Mandatory = $false)]
+        [string]$ExportFormat,
+
+        [Parameter(Mandatory = $false)]
+        [string]$ExportPath,
+
+        [Parameter(Mandatory = $false)]
         [switch]$Raw
     )
 
-    # Writes a verbose message if -Verbose is used
-    Write-Verbose "Retrieving CPU information..."
+    # --- define allowed export formats ---
+    $validFormats = @('CSV','JSON','TXT','XML','HTML')
 
-    try {
-        # Gets CPU info using CIM (Common Information Model)
-        $cpus = Get-CimInstance -ClassName Win32_Processor -ErrorAction Stop
+    # --- collect results from all computers ---
+    $results = @()
+
+    # --- define script block to run locally or remotely ---
+    $scriptBlock = {
+        param($rawFlag)
+
+        $cpus = $null
+
+        try {
+            $cpus = Get-CimInstance -ClassName Win32_Processor -ErrorAction Stop
+        }
+        catch {
+            Write-Error "[$env:COMPUTERNAME] Failed to retrieve CPU info: $_"
+            return
+        }
+
+        if ($rawFlag) {
+            return [pscustomobject]@{
+                ComputerName = $env:COMPUTERNAME
+                CPUs         = $cpus
+            }
+        }
+        else {
+            $cpuList = foreach ($cpu in $cpus) {
+                [pscustomobject]@{
+                    'ComputerName'               = $env:COMPUTERNAME
+                    'Name'                       = $cpu.Name
+                    'Manufacturer'               = $cpu.Manufacturer
+                    'SocketDesignation'          = $cpu.SocketDesignation
+                    'NumberOfCores'              = $cpu.NumberOfCores
+                    'NumberOfLogicalProcessors'  = $cpu.NumberOfLogicalProcessors
+                    'MaxClockSpeedMHz'           = $cpu.MaxClockSpeed
+                    'Architecture'               = switch ($cpu.Architecture) {
+                                                        0 { 'x86' }
+                                                        1 { 'MIPS' }
+                                                        2 { 'Alpha' }
+                                                        3 { 'PowerPC' }
+                                                        5 { 'ARM' }
+                                                        6 { 'Itanium-based systems' }
+                                                        9 { 'x64' }
+                                                        default { "Unknown ($($cpu.Architecture))" }
+                                                    }
+                    'ProcessorId'                = $cpu.ProcessorId
+                    'Revision'                   = $cpu.Revision
+                    'DataWidth'                  = "$($cpu.DataWidth)-bit"
+                }
+            }
+            return $cpuList
+        }
     }
-    catch {
-        # If the command fails, write an error and exit the function
-        Write-Error "Failed to retrieve CPU info: $($_.Exception.Message)"
+
+    foreach ($comp in $ComputerName) {
+        try {
+            if ($comp -eq $env:COMPUTERNAME) {
+                $results += & $scriptBlock $Raw
+            }
+            else {
+                $output = Invoke-Command -ComputerName $comp -ScriptBlock $scriptBlock -ArgumentList $Raw -ErrorAction Stop
+                $results += $output
+            }
+        }
+        catch {
+            Write-Error "Error collecting data from '$comp': $_"
+        }
+    }
+
+    # --- return early if Raw ---
+    if ($Raw) { return $results }
+
+    # --- if no ExportFormat, just return the data, do not save ---
+    if (-not $ExportFormat) {
+        return $results
+    }
+
+    # --- validate ExportFormat manually ---
+    if ($ExportFormat -notin $validFormats) {
+        Write-Error "Invalid ExportFormat '$ExportFormat'. Valid options are: $($validFormats -join ', ')"
         return
     }
 
-    # If -Raw is used, return the full set of CIM objects directly
-    if ($Raw) {
-        return $cpus
+    # --- build default export path if not supplied ---
+    if (-not $ExportPath) {
+        $stamp = Get-Date -Format 'yyyy-MM-dd_HH-mm-ss'
+        $ExportPath = Join-Path $env:TEMP "CPU_$stamp.$($ExportFormat.ToLower())"
+    }
+    elseif (Test-Path $ExportPath -PathType Container) {
+        $stamp = Get-Date -Format 'yyyyMMdd_HHmmss'
+        $ExportPath = Join-Path $ExportPath "CPU_$stamp.$($ExportFormat.ToLower())"
     }
 
-    # Formats each CPU object into a simpler custom object
-    foreach ($cpu in $cpus) {
-        [pscustomobject]@{
-            'Name'                     = $cpu.Name                         
-            'Manufacturer'             = $cpu.Manufacturer                 
-            'Socket Designation'       = $cpu.SocketDesignation            
-            'Number Of Cores'          = $cpu.NumberOfCores                
-            'Number Of Logical Processors' = $cpu.NumberOfLogicalProcessors  
-            'Max Clock Speed (MHz)'    = $cpu.MaxClockSpeed                
-
-            # Translates architecture code to readable form
-            'Architecture'             = switch ($cpu.Architecture) {
-                                            0 { 'x86' }
-                                            1 { 'MIPS' }
-                                            2 { 'Alpha' }
-                                            3 { 'PowerPC' }
-                                            5 { 'ARM' }
-                                            6 { 'Itanium-based systems' }
-                                            9 { 'x64' }
-                                            default { "Unknown ($($cpu.Architecture))" }
-                                        }
-
-            'Processor ID'             = $cpu.ProcessorId                 
-            'Revision'                 = $cpu.Revision                             
+    # --- export with error handling ---
+    try {
+        switch ($ExportFormat) {
+            'CSV'  { $results | Export-Csv -Path $ExportPath -NoTypeInformation -Force }
+            'JSON' { $results | ConvertTo-Json -Depth 10 | Set-Content -Path $ExportPath -Force }
+            'TXT'  { $results | Out-String | Set-Content -Path $ExportPath -Force }
+            'XML'  { $results | ConvertTo-Xml -As String -Depth 5 | Set-Content -Path $ExportPath -Force }
+            'HTML' { $results | ConvertTo-Html | Set-Content -Path $ExportPath -Force }
         }
-    }
-}
 
+        Write-Verbose "Export successful. Saved to: $ExportPath"
+    }
+    catch {
+        Write-Error "Failed to export to '$ExportPath': $_"
+        return
+    }
+
+    return $ExportPath
+}
